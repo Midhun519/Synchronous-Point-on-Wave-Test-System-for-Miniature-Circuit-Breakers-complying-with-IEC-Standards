@@ -1,0 +1,355 @@
+---
+
+## 💾 Saving the Firmware File
+
+Create a folder named `firmware` and save your ESP32 code inside it as `point_on_wave_mcb_test.ino`. Here is the exact code provided ready to be saved:
+
+```cpp
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Wire.h>
+#include <U8g2lib.h>
+
+// --- Wi-Fi Access Point Configuration ---
+const char* apSSID = "POW_DigitalTwin";
+const char* apPassword = "password123";
+
+WebServer server(80);
+
+// --- Pin Definitions ---
+const int ZC_PIN = 34;          // H11AA1 Zero-Cross Input
+const int ZMPT_PIN = 35;        // ZMPT101B Voltage ADC Input
+
+// Rotary Encoder Pins
+const int ENC_CLK = 18;
+const int ENC_DT = 19;
+const int ENC_SW = 23;
+
+// Physical Status LED Pins
+const int LED_GREEN = 26;
+const int LED_RED = 27;
+
+// --- OLED Setup (128x64 SSD1306 I2C) ---
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+
+// --- System Variables ---
+volatile int firingAngle = 90;         // 0 to 360 degrees for full wave
+unsigned long delayMicros = 0;       
+volatile bool zeroCrossDetected = false;
+
+// --- Digital Twin Thermal Variables (I^2t) ---
+float thermalCapacity = 0.0;           
+const float tripThreshold = 100.0;     
+bool mcbTrippedState = false;
+
+// --- Zero-Crossing Interrupt Service Routine ---
+void IRAM_ATTR onZeroCross() {
+  zeroCrossDetected = true;
+  delayMicros = (10000L * firingAngle) / 360L;
+}
+
+// --- Rotary Encoder Interrupt (Full 0-360 Degree Range) ---
+void IRAM_ATTR handleEncoder() {
+  static unsigned long lastInterruptTime = 0;
+  unsigned long interruptTime = millis();
+  
+  if (interruptTime - lastInterruptTime > 2) {
+    if (digitalRead(ENC_DT) == HIGH) {
+      firingAngle += 5;
+      if (firingAngle > 360) firingAngle = 360;
+    } else {
+      firingAngle -= 5;
+      if (firingAngle < 0) firingAngle = 0;
+    }
+    lastInterruptTime = interruptTime;
+  }
+}
+
+// --- HTML Web Dashboard Page with Plain 2D White MCB Model ---
+const char WEB_PAGE[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IEC MCB Digital Twin</title>
+  <style>
+    body { font-family: Arial, sans-serif; background-color: #121212; color: #ffffff; text-align: center; margin: 0; padding: 20px; }
+    .card { background: #1e1e1e; border-radius: 12px; padding: 20px; margin: 15px auto; max-width: 450px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+    h2 { color: #00d2ff; margin-bottom: 5px; }
+    .metric { font-size: 32px; font-weight: bold; color: #ffffff; margin: 10px 0; }
+    
+    /* Plain 2D White MCB Model Styling */
+    .mcb-scene { width: 130px; height: 240px; margin: 20px auto; }
+    .mcb-housing {
+      width: 120px; height: 230px; 
+      background: #ffffff;
+      border-radius: 4px; margin: 0 auto; position: relative;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.4);
+      border: 2px solid #dcdcdc;
+    }
+    
+    /* Top and Bottom Terminals */
+    .mcb-terminal-top, .mcb-terminal-bot {
+      position: absolute; left: 10px; width: 96px; height: 28px;
+      background: #e0e0e0;
+      border: 1px solid #b0b0b0;
+    }
+    .mcb-terminal-top { top: 0px; border-radius: 2px 2px 0 0; }
+    .mcb-terminal-bot { bottom: 0px; border-radius: 0 0 2px 2px; }
+    
+    .screw-hole {
+      position: absolute; top: 7px; left: 38px; width: 12px; height: 12px;
+      background: #999; border-radius: 50%; border: 1px solid #666;
+    }
+
+    /* Toggle Switch Well */
+    .mcb-toggle-well {
+      position: absolute; top: 90px; left: 35px; width: 50px; height: 60px;
+      background: #e8e8e8; border-radius: 3px; border: 1px solid #ccc;
+    }
+
+    /* Toggle Handle */
+    .mcb-handle {
+      position: absolute; top: 14px; left: 5px; width: 38px; height: 28px;
+      background: #0d6efd;
+      border-radius: 3px; border: 1px solid #0a58ca;
+      cursor: pointer;
+      transform-origin: 19px 14px;
+      transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1), background 0.3s;
+    }
+    .handle-normal { transform: translateY(0px) rotate(0deg); }
+    .handle-tripped { transform: translateY(16px) rotate(-40deg); background: #dc3545; border-color: #b02a37; }
+
+    .status-normal { background-color: #28a745; color: white; padding: 15px; border-radius: 8px; font-size: 20px; font-weight: bold; }
+    .status-warning { background-color: #ffc107; color: black; padding: 15px; border-radius: 8px; font-size: 20px; font-weight: bold; }
+    .status-tripped { background-color: #dc3545; color: white; padding: 15px; border-radius: 8px; font-size: 20px; font-weight: bold; animation: pulse 1s infinite; }
+    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.6; } 100% { opacity: 1; } }
+    
+    .progress-container { background: #333; border-radius: 10px; height: 25px; width: 100%; margin-top: 10px; overflow: hidden; }
+    .progress-bar { background: linear-gradient(90deg, #00d2ff, #ff4b4b); height: 100%; width: 0%; transition: width 0.3s ease; }
+    .btn { background: #007acc; color: white; border: none; padding: 12px 25px; font-size: 16px; font-weight: bold; border-radius: 6px; cursor: pointer; margin-top: 15px; }
+    .btn:hover { background: #005999; }
+  </style>
+</head>
+<body>
+  <h2>Point-on-Wave Digital Twin</h2>
+  <p style="color: #aaa; margin-top: 0;">IEC Miniature Circuit Breaker Cyber-Physical Demonstrator</p>
+
+  <div class="card">
+    <div>Firing Angle Setpoint</div>
+    <div class="metric" id="angleVal">-- &deg;</div>
+  </div>
+
+  <div class="card">
+    <div>Live Grid Voltage</div>
+    <div class="metric" id="voltVal">-- V</div>
+  </div>
+
+  <div class="card">
+    <div style="margin-bottom: 5px; font-weight: bold;">Digital Twin MCB Model</div>
+    
+    <!-- Plain 2D White MCB Model -->
+    <div class="mcb-scene">
+      <div class="mcb-housing">
+        <div class="mcb-terminal-top">
+          <div class="screw-hole"></div>
+        </div>
+
+        <div class="mcb-toggle-well">
+          <div id="mcbToggle" class="mcb-handle handle-normal"></div>
+        </div>
+
+        <div class="mcb-terminal-bot">
+          <div class="screw-hole"></div>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-bottom: 10px; margin-top: 15px;">Virtual MCB Status</div>
+    <div id="mcbStatus" class="status-normal">SYSTEM NORMAL</div>
+    
+    <div style="text-align: left; margin-top: 20px; font-size: 14px;">Thermal Stress (I&sup2;t): <span id="thermalTxt">0.0%</span></div>
+    <div class="progress-container">
+      <div id="thermalBar" class="progress-bar"></div>
+    </div>
+
+    <button class="btn" onclick="resetSystem()">Reset MCB Trip</button>
+  </div>
+
+<script>
+  setInterval(updateData, 500);
+
+  function updateData() {
+    fetch('/data')
+      .then(response => response.json())
+      .then(data => {
+        document.getElementById('angleVal').innerHTML = data.angle + ' &deg;';
+        document.getElementById('voltVal').innerHTML = data.voltage.toFixed(1) + ' V';
+        document.getElementById('thermalTxt').innerHTML = data.thermal.toFixed(1) + '%';
+        document.getElementById('thermalBar').style.width = data.thermal + '%';
+
+        let mcbBox = document.getElementById('mcbStatus');
+        let mcbToggle = document.getElementById('mcbToggle');
+
+        if (data.tripped === 1) {
+          mcbBox.className = 'status-tripped';
+          mcbBox.innerHTML = 'MCB TRIPPED!';
+          mcbToggle.className = 'mcb-handle handle-tripped';
+        } else if (data.thermal > 75) {
+          mcbBox.className = 'status-warning';
+          mcbBox.innerHTML = 'WARNING: HIGH HEAT';
+          mcbToggle.className = 'mcb-handle handle-normal';
+        } else {
+          mcbBox.className = 'status-normal';
+          mcbBox.innerHTML = 'SYSTEM NORMAL';
+          mcbToggle.className = 'mcb-handle handle-normal';
+        }
+      });
+  }
+
+  function resetSystem() {
+    fetch('/reset').then(() => updateData());
+  }
+</script>
+</body>
+</html>
+)rawliteral";
+
+// --- Web Server Request Handlers ---
+void handleRoot() {
+  server.send_P(200, "text/html", WEB_PAGE);
+}
+
+void handleData() {
+  String json = "{";
+  json += "\"angle\":" + String(firingAngle) + ",";
+  json += "\"voltage\":" + String((analogRead(ZMPT_PIN) / 4095.0) * 12.0) + ",";
+  json += "\"thermal\":" + String(thermalCapacity) + ",";
+  json += "\"tripped\":" + String(mcbTrippedState ? 1 : 0);
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
+void handleReset() {
+  mcbTrippedState = false;
+  thermalCapacity = 0.0;
+  server.send(200, "text/plain", "OK");
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  Wire.begin(21, 22);
+
+  // Configure Pin Modes
+  pinMode(ZC_PIN, INPUT_PULLUP);
+  pinMode(ENC_CLK, INPUT_PULLUP);
+  pinMode(ENC_DT, INPUT_PULLUP);
+  pinMode(ENC_SW, INPUT_PULLUP);
+
+  pinMode(LED_GREEN, OUTPUT);
+  pinMode(LED_RED, OUTPUT);
+
+  // Attach Interrupts
+  attachInterrupt(digitalPinToInterrupt(ZC_PIN), onZeroCross, FALLING);
+  attachInterrupt(digitalPinToInterrupt(ENC_CLK), handleEncoder, FALLING);
+
+  // Initialize OLED Display
+  u8g2.begin();
+
+  // --- Start Wi-Fi Access Point ---
+  WiFi.softAP(apSSID, apPassword);
+  IPAddress myIP = WiFi.softAPIP();
+  Serial.println("");
+  Serial.print("Access Point Started! IP Address: ");
+  Serial.println(myIP);
+
+  // --- Setup Web Server Routes ---
+  server.on("/", handleRoot);
+  server.on("/data", handleData);
+  server.on("/reset", handleReset);
+  server.begin();
+  Serial.println("HTTP server started.");
+}
+
+void loop() {
+  server.handleClient(); // Handle incoming web client requests
+
+  // Reset trip state if physical encoder push-button is pressed
+  if (digitalRead(ENC_SW) == LOW) {
+    mcbTrippedState = false;
+    thermalCapacity = 0.0;
+    delay(300); // Debounce delay
+  }
+
+  // --- Read Voltage Sensor (ZMPT101B) ---
+  int rawVoltage = analogRead(ZMPT_PIN);
+  float voltageVal = (rawVoltage / 4095.0) * 12.0; 
+
+  // --- Digital Twin Thermal Accumulation (I^2t Simulation) ---
+  if (!mcbTrippedState) {
+    float angleSeverity = sin((firingAngle * 3.14159) / 180.0); 
+    float heatInput = (angleSeverity * angleSeverity) * 2.5; 
+    
+    thermalCapacity += heatInput;
+
+    // Cool down when firing at zero-crossing points (0, 180, or 360 degrees)
+    if (firingAngle == 0 || firingAngle == 180 || firingAngle == 360) {
+      thermalCapacity -= 1.5; 
+      if (thermalCapacity < 0) thermalCapacity = 0.0;
+    }
+
+    // Check if thermal threshold is breached
+    if (thermalCapacity >= tripThreshold) {
+      thermalCapacity = 100.0;
+      mcbTrippedState = true;
+    }
+  }
+
+  // --- Update Physical Status LEDs ---
+  if (mcbTrippedState || thermalCapacity > 75.0) {
+    digitalWrite(LED_RED, HIGH);    // Red ON (Fault / High Stress)
+    digitalWrite(LED_GREEN, LOW);   // Green OFF
+  } else {
+    digitalWrite(LED_RED, LOW);     // Red OFF
+    digitalWrite(LED_GREEN, HIGH);  // Green ON (Normal)
+  }
+
+  // --- Update OLED Display: Full Wave + Horizontal Cursor ---
+  u8g2.clearBuffer();
+  
+  // 1. Top status line (Shows angle only)
+  u8g2.setFont(u8g2_font_6x10_tr);
+  u8g2.setCursor(0, 9);
+  u8g2.print("Phase Angle: ");
+  u8g2.print(firingAngle);
+  u8g2.print(" Deg");
+
+  // 2. Draw Full AC Sine Wave Graph (0 to 360 degrees across 128 pixels)
+  int centerY = 38;
+  int amplitude = 18;
+  
+  // Draw zero baseline (dotted center line)
+  for (int x = 0; x < 128; x += 4) {
+    u8g2.drawPixel(x, centerY);
+  }
+
+  // Draw Full Sine Wave Cycle (Positive & Negative lobes: 0 to 2*pi radians)
+  for (int x = 0; x < 128; x++) {
+    float rad = (x / 127.0) * 2.0 * 3.14159; 
+    int y = centerY - (sin(rad) * amplitude);
+    u8g2.drawPixel(x, y);
+  }
+
+  // 3. Draw Moving Cursor Line (Vertical line moving horizontally across the full wave)
+  int cursorX = map(firingAngle, 0, 360, 0, 127);
+  for (int y = 14; y <= 62; y += 2) {
+    u8g2.drawPixel(cursorX, y); // Dotted vertical cursor line
+  }
+  // Small pointer triangle at the top of the cursor
+  u8g2.drawTriangle(cursorX, 13, cursorX - 2, 10, cursorX + 2, 10);
+  
+  u8g2.sendBuffer();
+
+  delay(50); 
+}
