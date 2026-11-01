@@ -1,10 +1,5 @@
 # Synchronous Point-on-Wave Test System for Miniature Circuit Breakers Complying with IEC Standards
 
-[![Microcontroller](https://img.shields.io/badge/ESP32-Xtensa%20LX6-blue.svg)](https://www.espressif.com/)
-[![Framework](https://img.shields.io/badge/Framework-Arduino%20IDE-00979D.svg)](https://www.arduino.cc/)
-[![Display](https://img.shields.io/badge/Display-U8g2%20OLED-orange.svg)](https://github.com/olikraus/u8g2)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-
 An advanced cyber-physical **Hardware-in-the-Loop (HIL) Point-on-Wave (POW) Test System** designed to synchronize switching angles, measure voltage telemetry, and simulate continuous thermal energy accumulation ($I^2t$) for Miniature Circuit Breakers (MCBs) in strict compliance with **IEC standard protection curves**, eliminating physical high-current testing hazards.
 
 ---
@@ -112,7 +107,7 @@ $$u[k] \propto \sin^2(\theta)$$
 *Figure 5.2: Complete experimental setup displaying the ESP32 microcontroller, ZMPT101B voltage sensor, step-down transformer, and rotary encoder on breadboard.*
 
 ### Real-Time Waveform Output on OLED
-![Sine WavOLED e Output](docs/oled_waveform.jpg)![alt text](image.png)
+![Sine WavOLED e Output](docs/oled_waveform.jpg)
 *Figure 5.3: 0.96" SSD1306 OLED rendering live sinusoidal wave graph with active phase cursor tracking.*
 
 ---
